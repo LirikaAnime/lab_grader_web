@@ -409,7 +409,7 @@ class TestLessons:
             ("15:10", "16:40", ("4431",), LAB, OS),
             ("18:40", "20:10", ("4434",), LAB, OS),
         ]
-        assert lessons[0].key == "15:10-16:40|4431|Лабораторное занятие|Операционные системы"
+        assert lessons[0].key == "12:10-13:40|4431|Лабораторное занятие|Операционные системы"
         assert lessons[0].starts_at == datetime(2026, 11, 9, 15, 10, tzinfo=MSK)
 
     def test_lecture_filtered_out(self, rs):
@@ -456,7 +456,7 @@ class TestLessons:
         source = make_source(teacher_id=2869, subject="Основы программной инженерии")
         lessons = source.lessons_on(THURSDAY, NOW)
         assert summary(lessons) == [("09:30", "12:40", ("4431",), LAB, "Основы программной инженерии")]
-        assert lessons[0].key == "09:30-12:40|4431|Лабораторное занятие|Основы программной инженерии"
+        assert lessons[0].key == "06:30-09:40|4431|Лабораторное занятие|Основы программной инженерии"
         assert source.lessons_on(date(2026, 11, 12), NOW) == []
 
     @pytest.mark.parametrize("name, teacher_id, subject, day, groups", [

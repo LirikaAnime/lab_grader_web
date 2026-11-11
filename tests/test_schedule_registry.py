@@ -200,7 +200,7 @@ class TestMergeAdjacent:
     def test_double_lab_becomes_one(self):
         merged = merge_adjacent([lesson("09:30", "11:00"), lesson("11:10", "12:40")])
         assert spans(merged) == [("09:30", "12:40", ("4431",))]
-        assert merged[0].key == "09:30-12:40|4431|Лабораторное занятие|ОС"
+        assert merged[0].key == "06:30-09:40|4431|Лабораторное занятие|ОС"
         assert (merged[0].lesson_type, merged[0].subject) == (LAB, "ОС")
 
     def test_three_in_a_row(self):
@@ -214,7 +214,7 @@ class TestMergeAdjacent:
         # 3-я и 4-я пары ГУАП: обед 40 минут, сдвоенная 3-4 пара - одна очередь.
         merged = merge_adjacent([lesson("13:00", "14:30"), lesson("15:10", "16:40")])
         assert spans(merged) == [("13:00", "16:40", ("4431",))]
-        assert merged[0].key == "13:00-16:40|4431|Лабораторное занятие|ОС"
+        assert merged[0].key == "10:00-13:40|4431|Лабораторное занятие|ОС"
 
     def test_longer_gap_not_merged(self):
         merged = merge_adjacent([lesson("13:00", "14:30"), lesson("15:11", "16:40")])
@@ -230,12 +230,12 @@ class TestMergeAdjacent:
         # отдельно: иначе у группы были бы две открытые очереди сразу.
         merged = merge_adjacent([lesson("09:30", "11:00"), lesson("09:30", "11:00"), lesson("11:10", "12:40")])
         assert spans(merged) == [("09:30", "12:40", ("4431",))]
-        assert merged[0].key == "09:30-12:40|4431|Лабораторное занятие|ОС"
+        assert merged[0].key == "06:30-09:40|4431|Лабораторное занятие|ОС"
 
     def test_lesson_inside_previous_absorbed(self):
         merged = merge_adjacent([lesson("09:30", "12:40"), lesson("11:10", "12:40"), lesson("09:30", "11:00")])
         assert spans(merged) == [("09:30", "12:40", ("4431",))]
-        assert merged[0].key == "09:30-12:40|4431|Лабораторное занятие|ОС"
+        assert merged[0].key == "06:30-09:40|4431|Лабораторное занятие|ОС"
 
     def test_absorbed_lesson_does_not_cut_the_union(self):
         merged = merge_adjacent([lesson("09:30", "14:30"), lesson("10:00", "11:00"), lesson("15:10", "16:40")])
@@ -244,7 +244,7 @@ class TestMergeAdjacent:
     def test_overlap_merged(self):
         merged = merge_adjacent([lesson("10:30", "12:00"), lesson("09:30", "11:00")])
         assert spans(merged) == [("09:30", "12:00", ("4431",))]
-        assert merged[0].key == "09:30-12:00|4431|Лабораторное занятие|ОС"
+        assert merged[0].key == "06:30-09:00|4431|Лабораторное занятие|ОС"
 
     @pytest.mark.parametrize("other", [
         {"groups": ("4432",)},
@@ -271,3 +271,19 @@ class TestMergeAdjacent:
 
     def test_empty(self):
         assert merge_adjacent([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Ключ занятия
+# ---------------------------------------------------------------------------
+
+
+class TestLessonKey:
+    def test_key_is_the_moment_not_the_clock_time(self):
+        """Пары ГУАП - по Москве, поправки и manual - по поясу курса: 15:10 в двух поясах - два занятия."""
+        utc = timezone.utc
+        moscow = Lesson.build(at("15:10"), at("16:40"), ["4431"], LAB, "ОС")
+        same_clock = Lesson.build(at("15:10", tz=utc), at("16:40", tz=utc), ["4431"], LAB, "ОС")
+        same_moment = Lesson.build(at("12:10", tz=utc), at("13:40", tz=utc), ["4431"], LAB, "ОС")
+        assert moscow.key != same_clock.key
+        assert moscow.key == same_moment.key == "12:10-13:40|4431|Лабораторное занятие|ОС"

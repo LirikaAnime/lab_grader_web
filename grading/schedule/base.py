@@ -29,7 +29,7 @@ def normalize_text(value) -> str:
 def lesson_key(starts_at: datetime, ends_at: datetime, groups: tuple[str, ...],
                lesson_type: str, subject: str) -> str:
     """
-    Identity of a lesson within one day.
+    Identity of a lesson within one day. Times are in UTC: sources build them in different zones.
 
     Built from what the lesson *is*, so a lesson moved to another time or
     another group gets a different key: the queue then stops accepting new
@@ -37,7 +37,7 @@ def lesson_key(starts_at: datetime, ends_at: datetime, groups: tuple[str, ...],
     of the day (customer's answer about schedule changes in issue #62).
     """
     return (
-        f"{starts_at:%H:%M}-{ends_at:%H:%M}"
+        f"{starts_at.astimezone(timezone.utc):%H:%M}-{ends_at.astimezone(timezone.utc):%H:%M}"
         f"|{','.join(groups)}|{lesson_type}|{subject}"
     )
 

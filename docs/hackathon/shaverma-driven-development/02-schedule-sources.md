@@ -203,7 +203,7 @@
 
 - Подключить вуз: нужен `grading/schedule/<name>.py` с `SOURCE_NAME` и `build(cfg, ctx)`. Его конфиг сразу проверяется при старте, в редакторе курса и при загрузке нового курса тем же `build()` без сети (`_check_schedule`, `grading/defense_queue.py:122-131`).
 - Тестировать источник отдельно: HTTP подменяет `responses`, страницы — фикстуры, время — параметр `now`.
-- Ядро очереди ничего не знает о вузах, чётности и сетке пар. Ключ занятия собран из того, что оно есть: время, группы, тип, предмет (`lesson_key`, `base.py:29-42`). Пара на новом месте получает новый ключ.
+- Ядро очереди ничего не знает о вузах, чётности и сетке пар. Ключ занятия собран из того, что оно есть: время в UTC, группы, тип, предмет (`lesson_key`, `base.py:29-42`). Пара на новом месте получает новый ключ.
 - Преподаватель видит состояние расписания (`schedule.state`, `error`, `fetched_at` в `GET /admin/courses/{id}/queue`) с пояснением на ru/en/zh.
 - Курсы одного преподавателя делят одну загрузку (`test_cache_shared_by_courses_of_one_teacher`).
 
@@ -279,7 +279,7 @@
 
 ```bash
 export ADMIN_LOGIN=test ADMIN_PASSWORD=test SECRET_KEY=test GITHUB_TOKEN=dummy
-pytest tests/test_schedule_guap.py tests/test_schedule_manual.py tests/test_schedule_registry.py tests/test_schedule_changes.py -v   # 270 тестов
+pytest tests/test_schedule_guap.py tests/test_schedule_manual.py tests/test_schedule_registry.py tests/test_schedule_changes.py -v   # 272 теста
 pytest tests/test_queue_config.py tests/test_defense_queue.py tests/test_queue_endpoints.py -v
 ```
 

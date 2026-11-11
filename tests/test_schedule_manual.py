@@ -76,7 +76,7 @@ class TestLessons:
             ("18:40", "20:10", ("4434",)),
         ]
         lesson = source.lessons_on(MONDAY, NOW)[0]
-        assert lesson.key == "15:10-16:40|4431||"
+        assert lesson.key == "12:10-13:40|4431||"
         assert (lesson.lesson_type, lesson.subject) == ("", "")
 
     def test_time_in_course_timezone(self):
@@ -108,7 +108,7 @@ class TestLessons:
         ]}
         lessons = make_source(cfg).lessons_on(date(2026, 11, 5), NOW)
         assert times(lessons) == [("09:30", "12:40", ("4431",))]
-        assert lessons[0].key == "09:30-12:40|4431||"
+        assert lessons[0].key == "06:30-09:40|4431||"
 
     def test_duplicate_lesson_and_next_pair_are_one_queue(self):
         # Занятие, по ошибке записанное в конфиг дважды, не даёт второй очереди.

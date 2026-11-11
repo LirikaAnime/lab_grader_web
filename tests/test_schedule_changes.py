@@ -134,7 +134,7 @@ class TestFormat:
         """)
         assert source.lessons_on(TUESDAY, NOW) == []
         [extra] = source.lessons_on(THURSDAY, NOW)
-        assert extra.key == "15:10-16:40|4431|Лабораторное занятие|Операционные системы"
+        assert extra.key == "12:10-13:40|4431|Лабораторное занятие|Операционные системы"
 
     @pytest.mark.parametrize("changes", [None, []])
     def test_no_changes(self, changes):
@@ -240,7 +240,7 @@ class TestManual:
         [lesson] = source.lessons_on(WEDNESDAY, NOW)
         assert lesson.groups == ("4431",)
         # Ключ построен заново, как если бы у занятия была одна группа.
-        assert lesson.key == "09:30-11:00|4431||"
+        assert lesson.key == "06:30-08:00|4431||"
 
     def test_extra_lesson_of_one_group(self):
         source = make_source(MANUAL, [{"date": "2026-11-12", "groups": ["4431"], "start": "15:10", "end": "16:40"}])
@@ -283,7 +283,7 @@ class TestManual:
         source = make_source(MANUAL, [{"date": "2026-11-09", "groups": ["4431"], "start": "16:50", "end": "18:20"}])
         lessons = source.lessons_on(MONDAY, NOW)
         assert summary(lessons) == [("15:10", "18:20", ("4431",)), ("18:40", "20:10", ("4434",))]
-        assert lessons[0].key == "15:10-18:20|4431||"
+        assert lessons[0].key == "12:10-15:20|4431||"
 
     def test_times_are_in_the_course_timezone(self):
         source = make_source(MANUAL, [
@@ -325,7 +325,7 @@ class TestGuap:
         ])
         lecture, lab = source.lessons_on(TUESDAY, NOW)
         assert (lecture.groups, lecture.lesson_type) == (("4431", "4432"), "Лекция")
-        assert lecture.key == f"09:30-11:00|4431,4432|Лекция|{OS}"
+        assert lecture.key == f"06:30-08:00|4431,4432|Лекция|{OS}"
         assert lab.groups == ("4432",)
 
     def test_extra_lesson_glued_to_the_pair_of_the_site(self, guap_site):
@@ -335,7 +335,7 @@ class TestGuap:
         }])
         lessons = source.lessons_on(MONDAY, NOW)
         assert summary(lessons) == [("15:10", "18:20", ("4431",)), ("18:40", "20:10", ("4434",))]
-        assert lessons[0].key == f"15:10-18:20|4431|{LAB}|{OS}"
+        assert lessons[0].key == f"12:10-15:20|4431|{LAB}|{OS}"
 
     def test_extra_lesson_without_type_is_a_queue_of_its_own(self, guap_site):
         """Без lesson-type и subject доп. занятие не совпадает с парой сайта и не склеивается с ней."""
@@ -352,7 +352,31 @@ class TestGuap:
         ])
         assert source.lessons_on(TUESDAY, NOW) == []
         [moved] = source.lessons_on(THURSDAY, NOW)
-        assert moved.key == f"13:00-14:30|4432|{LAB}|{OS}"
+        assert moved.key == f"10:00-11:30|4432|{LAB}|{OS}"
+
+    def test_extra_lesson_at_the_clock_time_of_a_pair_in_another_timezone(self, guap_site, tmp_path):
+        """
+        Курс в UTC+0: пара сайта 15:10-16:40 МСК (12:10 UTC) и доп. занятие той же
+        группы 15:10-16:40 по поясу курса - два разных занятия и две сессии.
+        """
+        utc = timezone.utc
+        source = make_source(GUAP, [{
+            "date": "2026-11-09", "groups": ["4431"], "start": "15:10", "end": "16:40",
+            "lesson-type": LAB, "subject": OS,
+        }], tz=utc)
+        lessons = [l for l in source.lessons_on(MONDAY, NOW) if l.groups == ("4431",)]
+        assert summary(lessons, utc) == [("12:10", "13:40", ("4431",)), ("15:10", "16:40", ("4431",))]
+        assert lessons[0].key != lessons[1].key
+
+        settings = QueueSettings(
+            open_before=timedelta(minutes=15), defended_prefix="vv", tz=utc, schedule_cfg=yaml.safe_load(GUAP),
+        )
+        queue = DefenseQueue(QueueStore(tmp_path / "queue.sqlite3"))
+        sessions = queue.sync_day("os", settings, lessons, datetime(2026, 11, 9, 12, 0, tzinfo=utc))
+        assert [(s["starts_at"], s["ends_at"]) for s in sessions] == [
+            ("2026-11-09T12:10:00+00:00", "2026-11-09T13:40:00+00:00"),
+            ("2026-11-09T15:10:00+00:00", "2026-11-09T16:40:00+00:00"),
+        ]
 
     def test_site_down_extra_lessons_still_open(self):
         """Ни страницы, ни копии: доп. занятие открывается по конфигу, день без него остаётся неизвестным."""
