@@ -100,6 +100,25 @@ def summary(lessons, tz=MSK):
     ]
 
 
+def course(base, changes, snapshots=None):
+    """Настройки очереди и источник курса с расписанием `base` и поправками `changes`."""
+    schedule = {**yaml.safe_load(base), "changes": changes}
+    settings = QueueSettings(open_before=timedelta(minutes=15), defended_prefix="vv", tz=MSK, schedule_cfg=schedule)
+    return settings, build_schedule_source(schedule, SourceContext(snapshots=snapshots, course_tz=MSK))
+
+
+def queue_today(settings, source, now):
+    """Занятия дня и текущие ключи так, как их получает очередь, в том числе при упавшем источнике."""
+    import main  # только здесь: остальные тесты обходятся без приложения
+
+    _, lessons = main._today("os", settings, source, now)
+    return lessons, main._lesson_keys(lessons)
+
+
+def sign_up(queue, login, group, session, now, keys):
+    return queue.sign_up("os", session["id"], StudentRecord(login, login, login, group), "1", "ЛР1", now, keys)
+
+
 @pytest.fixture(autouse=True)
 def clean_caches():
     reset_schedule_caches()
@@ -446,6 +465,63 @@ class TestGuap:
             assert [(e["github"], e["status"]) for e in view["entries"]] == [("alice", WAITING)]
             assert queue.call_next("os", regular["id"], after)["github"] == "alice"
 
+    def test_copy_turns_too_old_on_a_day_with_a_cancel(self, tmp_path):
+        """
+        Сессии дня созданы по копии ГУАП, потом в конфиг вписали отмену 4431,
+        а к паре копии исполнилось 14 дней.
+
+        Отмена от сайта не зависит: сессия 4431 больше не принимает новые
+        записи, уже записанные остаются и принимаются; сессия 4434 работает
+        как при неизвестном расписании.
+        """
+        store = QueueStore(tmp_path / "queue.sqlite3")
+        queue = DefenseQueue(store)
+        before, after = datetime(2026, 11, 9, 14, 59, tzinfo=MSK), datetime(2026, 11, 9, 15, 1, tzinfo=MSK)
+        store.save_snapshot("guap:pr=39614", datetime(2026, 11, 9, 15, 0, tzinfo=MSK) - SNAPSHOT_MAX_AGE, POLYAK)
+
+        def today(changes, now):
+            settings, source = course(GUAP, changes, store)
+            lessons, keys = queue_today(settings, source, now)
+            return keys, {tuple(s["groups"]): s for s in queue.sync_day("os", settings, lessons, now)}
+
+        with responses.RequestsMock(assert_all_requests_are_fired=False) as rs:
+            rs.add(responses.GET, GUAP_URL, body=requests.ConnectionError("guap.ru is down"))
+
+            keys, sessions = today([], before)
+            assert sorted(sessions) == [("4431",), ("4434",)]
+            sign_up(queue, "alice", "4431", sessions[("4431",)], before, keys)
+
+            keys, sessions = today([{"date": "2026-11-09", "cancel": True, "groups": ["4431"]}], after)
+            cancelled, other = sessions[("4431",)], sessions[("4434",)]
+            assert DefenseQueue.signup_state(cancelled, after, keys) == SIGNUP_CLOSED
+            with pytest.raises(QueueError) as refused:
+                sign_up(queue, "bob", "4431", cancelled, after, keys)
+            assert refused.value.code == "SIGNUP_CLOSED"
+
+            [view] = [v for v in queue.day_view("os", MONDAY, after, keys) if v["id"] == cancelled["id"]]
+            assert view["in_schedule"] is False
+            assert [(e["github"], e["status"]) for e in view["entries"]] == [("alice", WAITING)]
+            assert queue.call_next("os", cancelled["id"], after)["github"] == "alice"
+
+            assert DefenseQueue.signup_state(other, after, keys) == SIGNUP_UPCOMING
+            sign_up(queue, "dave", "4434", other, datetime(2026, 11, 9, 18, 30, tzinfo=MSK), keys)
+
+    def test_cancel_set_in_advance_while_the_copy_turns_too_old(self, tmp_path):
+        """Отмена 4431 вписана заранее: сессии 4431 нет ни по копии, ни когда копия устарела; 4434 работает."""
+        store = QueueStore(tmp_path / "queue.sqlite3")
+        queue = DefenseQueue(store)
+        store.save_snapshot("guap:pr=39614", datetime(2026, 11, 9, 15, 0, tzinfo=MSK) - SNAPSHOT_MAX_AGE, POLYAK)
+        settings, source = course(GUAP, [{"date": "2026-11-09", "cancel": True, "groups": ["4431"]}], store)
+
+        with responses.RequestsMock(assert_all_requests_are_fired=False) as rs:
+            rs.add(responses.GET, GUAP_URL, body=requests.ConnectionError("guap.ru is down"))
+            for now in (datetime(2026, 11, 9, 0, 5, tzinfo=MSK), datetime(2026, 11, 9, 18, 30, tzinfo=MSK)):
+                lessons, keys = queue_today(settings, source, now)
+                [session] = queue.sync_day("os", settings, lessons, now)
+                assert session["groups"] == ["4434"]
+            assert source.status(now).state == STATE_UNAVAILABLE
+            assert DefenseQueue.signup_state(session, now, keys) == SIGNUP_OPEN
+
 
 # ---------------------------------------------------------------------------
 # A source of another university fails
@@ -486,3 +562,78 @@ class TestSourceError:
         ])
         with pytest.raises(RuntimeError, match="parser bug"):
             source.lessons_on(MONDAY, NOW)
+
+
+# ---------------------------------------------------------------------------
+# The source failed: of the day only the cancellations are known
+# ---------------------------------------------------------------------------
+
+class Failing:
+    """Источник другого вуза, у которого lessons_on падает с ошибкой."""
+    name = "otheruni"
+
+    def lessons_on(self, day, now):
+        raise RuntimeError("parser bug")
+
+
+DOUBLE = """
+source: manual
+lessons:
+    - groups: ["4431"]
+      weekday: mon
+      start: "15:10"
+      end: "16:40"
+    - groups: ["4431"]
+      weekday: mon
+      start: "16:50"
+      end: "18:20"
+"""
+
+
+class TestUnknownDay:
+    def test_what_a_cancellation_takes(self):
+        """Группу общей сессии, сессию, которая начинается в start (по поясу курса), любую сессию группы без start."""
+        changes = make_source(MANUAL, [
+            {"date": "2026-11-09", "cancel": True, "groups": ["4431"], "start": "15:10"},
+            {"date": "2026-11-09", "cancel": True, "groups": ["4434", "4435"]},
+        ]).changes
+        assert changes.unknown_day(TUESDAY) is None
+        unknown = changes.unknown_day(MONDAY)
+        assert list(unknown) == [] and not unknown
+
+        pair = datetime(2026, 11, 9, 15, 10, tzinfo=MSK)
+        assert unknown.cancelled(MONDAY, pair, ["4431", "4432"]) == {"4431"}
+        assert unknown.cancelled(MONDAY, pair.astimezone(timezone.utc), ["4431"]) == {"4431"}
+        assert unknown.cancelled(MONDAY, pair - timedelta(hours=2), ["4431"]) == set()
+        assert unknown.cancelled(MONDAY, pair + timedelta(hours=3, minutes=30), ["4433", "4434"]) == {"4434"}
+        assert unknown.cancelled(TUESDAY, pair, ["4431", "4434"]) == set()
+
+        # 17:10 по UTC+5 - это 15:10 по Москве.
+        local = make_source(MANUAL, [
+            {"date": "2026-11-09", "cancel": True, "groups": ["4431"], "start": "17:10"},
+        ], tz=UTC5)
+        assert local.changes.unknown_day(MONDAY).cancelled(MONDAY, pair, ["4431"]) == {"4431"}
+
+    def test_cancelled_pair_of_a_double_lesson(self, tmp_path):
+        """
+        Сдвоенная пара - одна сессия. Вторая пара, отменённая в сам день, пока
+        источник падает, запись не закрывает: первая идёт. Заранее отменённая
+        первая пара не закрывает сессию второй.
+        """
+        queue = DefenseQueue(QueueStore(tmp_path / "queue.sqlite3"))
+        morning = datetime(2026, 11, 9, 9, 0, tzinfo=MSK)
+
+        settings, source = course(DOUBLE, [])
+        [double] = queue.sync_day("os", settings, source.lessons_on(MONDAY, morning), morning)
+        assert (double["starts_at"], double["ends_at"]) == ("2026-11-09T12:10:00+00:00", "2026-11-09T15:20:00+00:00")
+        settings, _ = course(DOUBLE, [{"date": "2026-11-09", "cancel": True, "groups": ["4431"], "start": "16:50"}])
+        now = datetime(2026, 11, 9, 15, 30, tzinfo=MSK)
+        _, keys = queue_today(settings, Failing(), now)
+        sign_up(queue, "alice", "4431", double, now, keys)
+
+        settings, source = course(DOUBLE, [{"date": "2026-11-09", "cancel": True, "groups": ["4431"], "start": "15:10"}])
+        [second] = queue.sync_day("os-early", settings, source.lessons_on(MONDAY, morning), morning)
+        assert second["starts_at"] == "2026-11-09T13:50:00+00:00"
+        now = datetime(2026, 11, 9, 16, 40, tzinfo=MSK)
+        _, keys = queue_today(settings, Failing(), now)
+        queue.sign_up("os-early", second["id"], StudentRecord("bob", "bob", "bob", "4431"), "1", "ЛР1", now, keys)

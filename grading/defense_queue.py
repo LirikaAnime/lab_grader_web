@@ -32,6 +32,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from .queue_roster import StudentRecord
 from .queue_store import QueueError, QueueStore
 from .schedule.base import Lesson, ScheduleConfigError, SourceContext, normalize_text
+from .schedule.changes import UnknownDay
 
 logger = logging.getLogger(__name__)
 
@@ -584,22 +585,28 @@ def _clean_groups(groups) -> list[str]:
     return sorted(cleaned)
 
 
-def _in_schedule(session: dict, current_keys: set[str] | None) -> bool:
+def _in_schedule(session: dict, current_keys: set[str] | UnknownDay | None, group: str | None = None) -> bool:
     """
     False for a session made from the schedule whose lesson is gone from today's one.
 
     The whole-day queue counts too: its key "all-day" disappears as soon as
     the course gets a schedule, and from then on signups follow the new
     schedule. Only a manual session does not depend on the schedule.
+    When only the day's cancellations are known (UnknownDay), the lesson is
+    gone for `group` if it is cancelled, and for everyone if all the
+    session's groups are.
     """
-    return (
-        session["kind"] == KIND_MANUAL
-        or current_keys is None
-        or session["lesson_key"] in current_keys
-    )
+    if session["kind"] == KIND_MANUAL or current_keys is None:
+        return True
+    if isinstance(current_keys, UnknownDay):
+        cancelled = current_keys.cancelled(
+            date.fromisoformat(session["day"]), _parse(session["starts_at"]), session["groups"]
+        )
+        return not cancelled or (group not in cancelled and cancelled != set(session["groups"]))
+    return session["lesson_key"] in current_keys
 
 
-def _is_shown(session: dict, entries: list, current_keys: set[str] | None) -> bool:
+def _is_shown(session: dict, entries: list, current_keys: set[str] | UnknownDay | None) -> bool:
     # Занятие пропало из расписания, и на него никто не записывался -
     # показывать нечего.
     return bool(entries) or _in_schedule(session, current_keys)
@@ -714,7 +721,12 @@ class DefenseQueue:
             return [_session_out(row) for row in _day_sessions(conn, course_id, day)]
 
     @staticmethod
-    def signup_state(session: dict, now: datetime, current_keys: set[str] | None = None) -> str:
+    def signup_state(
+        session: dict,
+        now: datetime,
+        current_keys: set[str] | UnknownDay | None = None,
+        group: str | None = None,
+    ) -> str:
         """
         SIGNUP_UPCOMING, SIGNUP_OPEN or SIGNUP_CLOSED for a session dict.
 
@@ -722,9 +734,10 @@ class DefenseQueue:
         teacher closed it or - for any session but a manual one - the lesson
         is no longer in the schedule (`current_keys` = keys of today's
         lessons, None when the schedule is unknown and nothing can be
-        concluded).
+        concluded, UnknownDay when only the day's cancellations are known:
+        then it is closed to a cancelled `group` too, see _in_schedule).
         """
-        if session["closed_at"] or not _in_schedule(session, current_keys):
+        if session["closed_at"] or not _in_schedule(session, current_keys, group):
             return SIGNUP_CLOSED
         now = _utc(now)
         if now < _parse(session["signup_opens_at"]):
@@ -745,7 +758,7 @@ class DefenseQueue:
         lab_key: str,
         lab_name: str,
         now: datetime,
-        current_keys: set[str] | None = None,
+        current_keys: set[str] | UnknownDay | None = None,
     ) -> dict:
         """
         Put a student at the end of a session's queue.
@@ -768,7 +781,7 @@ class DefenseQueue:
             _expire_past(conn, course_id, now)
             session = _session_out(_session_row(conn, course_id, session_id))
 
-            if self.signup_state(session, now, current_keys) != SIGNUP_OPEN:
+            if self.signup_state(session, now, current_keys, group) != SIGNUP_OPEN:
                 raise QueueError("SIGNUP_CLOSED")
             if session["groups"] and group not in session["groups"]:
                 raise QueueError("NOT_YOUR_GROUP")
@@ -1104,7 +1117,7 @@ class DefenseQueue:
         course_id: str,
         day,
         now: datetime,
-        current_keys: set[str] | None = None,
+        current_keys: set[str] | UnknownDay | None = None,
         *,
         settings: QueueSettings | None = None,
         lessons: list[Lesson] | None = None,
@@ -1148,7 +1161,7 @@ class DefenseQueue:
         *,
         login: str | None = None,
         group: str | None = None,
-        current_keys: set[str] | None = None,
+        current_keys: set[str] | UnknownDay | None = None,
         settings: QueueSettings | None = None,
         lessons: list[Lesson] | None = None,
     ) -> dict:
@@ -1221,7 +1234,7 @@ class DefenseQueue:
                 "ends_at": session["ends_at"],
                 "signup_opens_at": session["signup_opens_at"],
                 "signup_closes_at": session["signup_closes_at"],
-                "signup": self.signup_state(session, now, current_keys),
+                "signup": self.signup_state(session, now, current_keys, group),
                 "for_me": for_me,
                 "waiting_count": len(waiting),
                 "called_count": len(called),

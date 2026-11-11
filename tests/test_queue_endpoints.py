@@ -32,6 +32,7 @@ import main as main_module
 from grading.defense_queue import DefenseQueue
 from grading.queue_roster import reset_roster_cache
 from grading.schedule import reset_schedule_caches
+from grading.schedule.manual import ManualSource
 from main import app
 
 MSK = timezone(timedelta(hours=3))
@@ -1806,3 +1807,37 @@ def test_cancelled_and_extra_lessons_from_the_config(courses_dir, clock):
     assert response.status_code == 200, response.text
     assert response.json()["my_entry"]["place"] == 1
     assert session_for(response.json(), "4431")["signup"] == "open"
+
+
+def test_cancel_of_one_group_holds_while_the_source_fails(courses_dir, monkeypatch):
+    """
+    Сессию общей пары 4431 и 4432 уже создали, потом в конфиг вписали отмену
+    4431, а модуль источника падает с ошибкой. Студенту 4431 запись закрыта,
+    4432 видит пустую сессию и записывается как обычно.
+    """
+    schedule = {"source": "manual", "lessons": [
+        {"groups": ["4431", "4432"], "weekday": "mon", "start": "15:10", "end": "16:40"},
+    ]}
+    add_course(courses_dir, "os-shared", course_yaml({"enabled": True, "schedule": schedule}))
+    [session] = TestClient(app).get(queue_url(course_id="os-shared")).json()["sessions"]
+
+    schedule["changes"] = [{"date": "2026-11-09", "cancel": True, "groups": ["4431"]}]
+    (courses_dir / "os-shared.yaml").write_text(
+        yaml.dump(course_yaml({"enabled": True, "schedule": schedule}), allow_unicode=True), encoding="utf-8",
+    )
+
+    def parser_bug(self, day, now):
+        raise RuntimeError("parser bug")
+
+    monkeypatch.setattr(ManualSource, "lessons_on", parser_bug)
+
+    bob, dave = student("bob", course_id="os-shared"), student("dave", course_id="os-shared")
+    assert [s["signup"] for s in bob.get(queue_url(course_id="os-shared")).json()["sessions"]] == ["closed"]
+    assert sign_up(bob, session["id"], course_id="os-shared").json() == {"detail": "SIGNUP_CLOSED"}
+    assert [s["signup"] for s in dave.get(queue_url(course_id="os-shared")).json()["sessions"]] == ["open"]
+    response = sign_up(dave, session["id"], course_id="os-shared")
+    assert response.status_code == 200, response.text
+
+    [day] = admin().get(admin_url(course_id="os-shared")).json()["sessions"]
+    assert (day["in_schedule"], day["signup"]) == (True, "open")
+    assert [e["github"] for e in day["entries"]] == ["dave"]

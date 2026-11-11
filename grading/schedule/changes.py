@@ -46,6 +46,10 @@ class Cancel:
     groups: tuple[str, ...]
     start: time | None
 
+    def takes(self, starts_at: datetime, course_tz: tzinfo) -> bool:
+        """Whether it is about the lesson of its day starting at `starts_at` (any lesson without `start`)."""
+        return self.start is None or starts_at.astimezone(course_tz).time() == self.start
+
 
 @dataclass(frozen=True)
 class Extra:
@@ -147,7 +151,7 @@ class ScheduleChanges:
         self.course_tz = course_tz
 
     def _cancel(self, lesson: Lesson, cancel: Cancel) -> Lesson | None:
-        if cancel.start is not None and lesson.starts_at.astimezone(self.course_tz).time() != cancel.start:
+        if not cancel.takes(lesson.starts_at, self.course_tz):
             return lesson
         groups = [g for g in lesson.groups if g not in cancel.groups]
         if len(groups) == len(lesson.groups):
@@ -193,6 +197,7 @@ class ScheduleChanges:
 
         Raises:
             the source's exception, when the day has no extra lessons
+            (what is still known of that day is unknown_day)
         """
         try:
             lessons = source.lessons_on(day, now)
@@ -206,3 +211,49 @@ class ScheduleChanges:
             )
             return extra
         return self.apply(day, lessons)
+
+    def unknown_day(self, day: date) -> "UnknownDay | None":
+        """The day's cancellations, for a day lessons_on raised for; None when it has none."""
+        cancels = tuple(c for c in self.cancels if c.day == day)
+        return UnknownDay(day, cancels, self.course_tz) if cancels else None
+
+
+class UnknownDay:
+    """
+    Today's lessons when the source failed and the day has no extra lessons
+    (main._today): none are known, only the day's cancellations.
+
+    It holds no lessons, so no session is created from it. Passed on as the
+    current keys, it closes signup only to the cancelled groups
+    (defense_queue._in_schedule); the rest works as with an unknown
+    schedule (None).
+    """
+
+    def __init__(self, day: date, cancels: tuple[Cancel, ...], course_tz: tzinfo):
+        self.day = day
+        self.cancels = cancels
+        self.course_tz = course_tz
+
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self):
+        return 0
+
+    def cancelled(self, day: date, starts_at: datetime, groups) -> set[str]:
+        """
+        Which of `groups` the cancellations take off a session of `day` starting at `starts_at`.
+
+        Without the schedule a session is one lesson, like a double lesson
+        written as one in `manual`: a cancellation with `start` takes it
+        only when it starts at that time. So a cancelled second pair of a
+        double lesson leaves its session open, a cancelled first pair
+        closes it.
+        """
+        if day != self.day:
+            return set()
+        return {
+            group
+            for cancel in self.cancels if cancel.takes(starts_at, self.course_tz)
+            for group in groups if group in cancel.groups
+        }

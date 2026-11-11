@@ -107,6 +107,7 @@ from grading.defense_queue import (
 )
 from grading.queue_store import QueueStore
 from grading.schedule import ScheduleUnavailable, SourceContext, build_schedule_source
+from grading.schedule.changes import UnknownDay, parse_changes
 import tempfile
 
 # Configure logging to both file and console
@@ -2884,7 +2885,7 @@ def _queue_tz(course_info: dict, settings: QueueSettings | None) -> timezone:
         return timezone.utc
 
 
-def _today(course_id: str, settings: QueueSettings, source, now: datetime) -> tuple[date, list | None]:
+def _today(course_id: str, settings: QueueSettings, source, now: datetime) -> tuple[date, list | UnknownDay | None]:
     """
     The course's day and today's lessons from the schedule source.
 
@@ -2894,7 +2895,8 @@ def _today(course_id: str, settings: QueueSettings, source, now: datetime) -> tu
     Returns:
         (the course's day, today's lessons - None when the schedule is
         unknown right now: no session is created then and nothing about
-        missing lessons is concluded)
+        missing lessons is concluded; UnknownDay when it is unknown, but
+        the config cancels lessons that day)
     """
     day = course_day(now, settings.tz)
     try:
@@ -2903,14 +2905,19 @@ def _today(course_id: str, settings: QueueSettings, source, now: datetime) -> tu
         # Ни свежего расписания, ни сохранённой копии: новые сессии не
         # создаются, уже созданные и ручные работают как работали. Источник
         # сам пишет причину в лог, преподаватель видит её в `schedule`.
-        return day, None
+        pass
     except Exception:
         logger.exception(f"Очередь курса {course_id}: ошибка источника расписания {source.name}")
-        return day, None
+    # Отмены из конфига от источника не зависят: в сессию, созданную раньше,
+    # отменённая группа не записывается и без расписания.
+    changes = parse_changes((settings.schedule_cfg or {}).get("changes"), SourceContext(None, settings.tz))
+    return day, changes.unknown_day(day)
 
 
-def _lesson_keys(lessons) -> set[str] | None:
-    return None if lessons is None else {lesson.key for lesson in lessons}
+def _lesson_keys(lessons) -> set[str] | UnknownDay | None:
+    if lessons is None or isinstance(lessons, UnknownDay):
+        return lessons
+    return {lesson.key for lesson in lessons}
 
 
 def _schedule_json(source, now: datetime) -> dict:
