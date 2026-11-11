@@ -50,24 +50,27 @@ export function createQueueApi({ baseUrl, fetchImpl, timeoutMs = QUEUE_REQUEST_T
       options.body = JSON.stringify(body);
     }
 
+    // fetch() завершается уже по заголовкам, поэтому таймер снимается только
+    // после чтения тела: застрявший JSON иначе держал бы опрос и кнопки преподавателя.
     let response;
+    let data = null;
     try {
       response = await doFetch(`${root}${path}${buildQuery(query)}`, options);
+      try {
+        data = await response.json();
+      } catch (cause) {
+        if (controller.signal.aborted) throw cause;
+        // тело может быть пустым - код ошибки тогда выводится из статуса
+      }
     } catch (cause) {
       const error = new Error("Queue request failed", { cause });
-      error.code = cause?.name === "AbortError" ? "request_timeout" : "network_error";
+      error.code =
+        cause?.name === "AbortError" || controller.signal.aborted ? "request_timeout" : "network_error";
       error.status = 0;
       error.payload = {};
       throw error;
     } finally {
       clearTimeout(timeoutId);
-    }
-
-    let data = null;
-    try {
-      data = await response.json();
-    } catch {
-      // тело может быть пустым - код ошибки тогда выводится из статуса
     }
 
     if (!response.ok) {

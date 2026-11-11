@@ -4,6 +4,7 @@ import test from "node:test";
 // Тест лежит здесь, а не в src/api/: sh раскрывает глоб npm test
 // `src/**/*.test.js` как src/*/*.test.js, и тогда запустился бы только он.
 import { createQueueApi, queueErrorCode } from "../../api/queue.js";
+import { createPoller } from "./state.js";
 
 
 function jsonResponse(status, body) {
@@ -178,4 +179,85 @@ test("сбой сети и таймаут дают свои коды", async () 
       }),
   });
   await assert.rejects(hanging.getState("c"), (error) => error.code === "request_timeout");
+});
+
+// Ответ 200: заголовки пришли, а тело оборвалось на середине JSON и дальше
+// не идёт, пока запрос не отменят. Чем поток ошибается при отмене, зависит
+// от реализации fetch, поэтому ошибку можно подменить.
+function stalledBodyFetch(abortError = () => new DOMException("Aborted", "AbortError")) {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"sessions":'));
+          options.signal.addEventListener("abort", () => controller.error(abortError()));
+        },
+      }),
+      { status: 200 }
+    );
+  };
+  return { calls, fetchImpl };
+}
+
+// Без таймаута на тело запрос висит вечно: тест должен упасть, а не зависнуть.
+function settlesWithin(promise, ms) {
+  let guard;
+  const timeout = new Promise((resolve, reject) => {
+    guard = setTimeout(() => reject(new Error(`запрос не завершился за ${ms} мс`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(guard));
+}
+
+test("таймаут действует и на чтение тела: застрявший JSON - request_timeout", async () => {
+  const { calls, fetchImpl } = stalledBodyFetch();
+  const api = createQueueApi({ baseUrl: "", timeoutMs: 20, fetchImpl });
+
+  await assert.rejects(settlesWithin(api.getState("c"), 500), (error) => {
+    assert.equal(error.code, "request_timeout");
+    assert.equal(error.status, 0);
+    assert.deepEqual(error.payload, {});
+    return true;
+  });
+  assert.equal(calls[0].options.signal.aborted, true);
+});
+
+test("застрявшее тело не останавливает опрос: после таймаута он повторяется", async () => {
+  const { calls, fetchImpl } = stalledBodyFetch();
+  const api = createQueueApi({ baseUrl: "", timeoutMs: 20, fetchImpl });
+  let completed = 0;
+  const poller = createPoller(async () => {
+    try {
+      await api.getState("c");
+    } catch {
+      // ошибку опроса показывает компонент, здесь важен только повтор
+    }
+    completed += 1;
+    return 5;
+  });
+
+  poller.start();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  // run() зовут возврат на вкладку и обновление после действия
+  poller.run();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  poller.stop();
+
+  assert.ok(completed >= 1, "опрос должен завершиться по таймауту");
+  assert.ok(calls.length > 1, "после таймаута опрос должен повториться");
+});
+
+test("оборванное тело ответа на действие преподавателя - request_timeout", async () => {
+  // решает отменённый сигнал, а не имя ошибки потока
+  const { calls, fetchImpl } = stalledBodyFetch(() => new TypeError("terminated"));
+  const api = createQueueApi({ baseUrl: "/api/v1", timeoutMs: 20, fetchImpl });
+
+  await assert.rejects(settlesWithin(api.setOutcome("os", 42, "defended"), 500), (error) => {
+    assert.equal(error.code, "request_timeout");
+    assert.equal(error.status, 0);
+    return true;
+  });
+  assert.equal(calls[0].options.method, "POST");
+  assert.equal(calls[0].options.signal.aborted, true);
 });
